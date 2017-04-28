@@ -1,29 +1,5 @@
 #!/usr/bin/env python
 
-"""
-This is part of a project for Simon Lacoste-Julien's course:
-    http://www.iro.umontreal.ca/~slacoste/teaching/ift6085/W17/
-
-The code runs the experiment in Section 7.3 of
-    "Structured Prediction Energy Networks" - Belanger and McCallum, 2016
-
-We compare different pretraining strategies; in that work, they used (something like) what we call "local_and_global" pretraining.
-This amounts to the following 3 steps:
-    1. pretrain the local energy network with log-loss on the labels
-    2. freeze the parameters of the local energy network, and pretrain the global energy network
-    3. train both networks at the same time (aka "joint training" or "fine-tuning")
-
-
------------------- Differences from Belanger and McCallum (2016) ---------------
-Notably, we have better performance with MLPs and worse performance with SPENs.
-
-We perform gradient descent on the logits of y, as in 
-    "End-to-End Learning for Structured Prediction Energy Networks" - Belanger et al., 2017.
-
-There are a few things which were not clear from the paper, e.g. hyperparameter settings.
-The local energy pretraining proceedure and parametrization (eqn 4) was also somewhat unclear.
-
-"""
 
 import numpy 
 np = numpy
