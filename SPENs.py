@@ -56,13 +56,17 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=25) # TODO: currently this must evenly divide nex 
 parser.add_argument('--dataset', type=str, default='synthetic', choices=['synthetic', 'flickr', ''])
+parser.add_argument('--l2', type=float, default=.0005)
 parser.add_argument('--model', type=str, default='spen', choices=['spen', 'mlp', ''])
-parser.add_argument('--nex', type=int, default=100) # num_examples
+parser.add_argument('--nex', type=int, default=1500) # num_examples
 #parser.add_argument('--optimizer', type=str, default='sgd', choices=['adam', 'momentum', 'sgd'])
-parser.add_argument('--num_epochs', type=int, default=1000)
+parser.add_argument('--num_epochs', type=int, default=30)
 #parser.add_argument('--num_train_steps', type=int, default=1000)
 parser.add_argument('--num_inner_steps', type=int, default=50)
-parser.add_argument('--pretrain', type=int, default=0)
+# TODO:
+parser.add_argument('--pretrain', type=str, default='none', choices=['none', 'features', 'features_global', 'features_global_joint'],
+        help="features: pretrain the feature network to predict y;\n
+              features_global: pretraing the feature network, then clamp these and train the global network" )
 #
 parser.add_argument('--save', type=int, default=0)
 parser.add_argument('--save_dir', type=str, default="./")
@@ -96,6 +100,8 @@ if args_dict['save']:
 
 locals().update(args_dict)
 
+# TODO:
+l2 = np.float32(l2)
 
 # ---------------------------------------------------------------
 print "SET RANDOM SEED (TODO: rng vs. random.seed)"
@@ -195,6 +201,16 @@ params += feature_Ws
 feature_bs = [parameter((num_labels,), 'feature_b', 'bias')]
 params += feature_bs
 features = T.dot(x, feature_Ws[0]) + feature_bs[0]
+pretraining_loss = categorical_crossentropy(y_true, T.nnet.sigmoid(features)).mean()
+# zero-one loss
+pretraining_error = T.neq(y_true, T.cast(T.nnet.sigmoid(features)>.5, 'float32')).mean()
+opt = SGD(lr=.01, momentum=.9)
+pretraining_step = theano.function( inputs=[x, y_true], 
+                                      outputs=[pretraining_loss, pretraining_error],
+                                      updates=opt.get_updates(feature_Ws + feature_bs, [pretraining_loss, pretraining_error], (pretraining_loss)) )
+# this is used to initialize y_logits
+get_features = theano.function( inputs=[x],
+                                outputs=features)
 
 # local energy
 #local_b = parameter((num_labels, 1), 'local_b')
@@ -265,9 +281,6 @@ Training (everything is done using mini-batches in Belanger's paper!):
     compute and descend loss(x, y_true) using y
 """
 
-if pretrain:
-    assert False # TODO
-
 num_batches = nex / batch_size
 num_train_steps = num_epochs * num_batches
 
@@ -277,7 +290,20 @@ num_train_steps = num_epochs * num_batches
 y_step_monitored = np.empty((num_train_steps, batch_size, num_inner_steps, len(y_step_outputs), 16)) # TODO 16
 train_step_monitored = np.empty((num_train_steps, batch_size, len(train_step_outputs)))
 
-# TODO: test set!
+# ----------
+# PRETRAINING
+if pretrain: # TODO: how long to do it, etc.
+    for epoch in range(num_epochs):
+        shuffles = np.random.permutation(nex)
+        X = X[shuffles]
+        Y_true = Y_true[shuffles]
+        for batch in range(num_batches): 
+            XX = X[batch*batch_size: (batch+1)*batch_size]
+            YY = Y_true[batch*batch_size: (batch+1)*batch_size]
+            print pretraining_step(XX, YY)
+    
+    #assert False # TODO
+
 
 # training:
 step = 0
@@ -289,22 +315,23 @@ for epoch in range(num_epochs):
         XX = X[batch*batch_size: (batch+1)*batch_size]
         YY = Y_true[batch*batch_size: (batch+1)*batch_size]
         # initialize y
-        y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+        #y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+        y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
             monitored = y_step(XX, YY)
-            #print monitored
             y_step_monitored[step, :, inner_step, :] = np.array(monitored).transpose(1,0,2)
         monitored = train_step(XX, YY)
-        if 0: # train set if perfect 
+        if 0: # train set is perfect 
             print "01", monitored[-1].mean()
-            print "yp", monitored[-2][-1]
-            print "yt", monitored[-3][-1]
         #train_step_outputs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, zero_one_loss]
         # FIXME: shapes
         #train_step_monitored[step, :, :] = np.array(monitored)
         step += 1
-        if batch == num_batches - 1: # validation
+
+        #----------------- 
+        # validation
+        if batch == num_batches - 1:
             print "01", monitored[-1].mean()
             XX = Xv[batch*batch_size: (batch+1)*batch_size]
             YY = Y_truev[batch*batch_size: (batch+1)*batch_size]
@@ -316,11 +343,6 @@ for epoch in range(num_epochs):
                 #print monitored
                 y_step_monitored[step, :, inner_step, :] = np.array(monitored).transpose(1,0,2)
             monitored = evaluation(XX, YY)
-            #print "01 valid", monitored[-1].mean()
-            #print "yp", monitored[-2][-1]
-            #print "yt", monitored[-3][-1]
-
-    #print "loss", lo.mean(), "   cost", co.mean()
 
 
 assert False
