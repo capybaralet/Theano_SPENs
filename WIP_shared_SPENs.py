@@ -185,8 +185,8 @@ print "SET-UP TRAINING"
 x = T.matrix('float32')
 x.tag.test_value = X[:batch_size]
 # following Belanger et al. (2017), we optimize the logit instead of doing mirror descent
-y_logit = theano.shared(np.zeros((batch_size, num_labels)).astype('float32'), name='y_logit')
-#y_logit_full_batch = theano.shared(np.zeros((batch_size, num_labels)).astype('float32'), name='y_logit')
+y_logit_shared = theano.shared(np.zeros((batch_size, num_labels)).astype('float32'), name='y_logit_shared')
+y_logit = T.matrix('float32')
 y_bar = T.nnet.sigmoid(y_logit)
 y_true = T.matrix('float32')
 y_true.tag.test_value = Y_true[:batch_size]
@@ -256,9 +256,10 @@ surrogate_loss = binary_crossentropy(y_true, y_bar)
 # loss-augmented inference
 y_opt = SGD(lr=.1, momentum=.95)
 y_step_outputs = [y_bar, y_pred]
-y_step = theano.function([x, y_true], y_step_outputs, updates=y_opt.get_updates([y_logit], [], (surrogate_loss + energy_y_bar).mean()))
+# FIXME: these need to depend on y_logit_shared...
+y_step = theano.function([x, y_true], y_step_outputs, updates=y_opt.get_updates([y_logit_shared], [], (surrogate_loss + energy_y_bar).mean()))
 # at test time, we don't get to see the ground truth, we just find the y which minimizes the energy
-y_stepv = theano.function([x], y_step_outputs, updates=y_opt.get_updates([y_logit], [], (energy_y_bar).mean()))
+y_stepv = theano.function([x], y_step_outputs, updates=y_opt.get_updates([y_logit_shared], [], (energy_y_bar).mean()))
 
 # FIXME: train_loss = nan?
 
@@ -269,14 +270,14 @@ train_loss = train_loss * (train_loss > 0)
 train_loss = train_loss * (train_loss > 0) + get_l2(params)
 train_updates = SGD(lr=.01, momentum=.9).get_updates(params, [], train_loss.mean())
 train_step_outputs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-train_step = theano.function([x, y_true], train_step_outputs, updates=train_updates)
+train_step = theano.function([x, y_true], train_step_outputs, updates=train_updates, givens={y_logit: y_logit_shared})
 
 # for the global training, we only update the global params
 global_train_updates = SGD(lr=.01, momentum=.9).get_updates(global_params, [], train_loss.mean())
-global_train_step = theano.function([x, y_true], train_step_outputs, updates=train_updates)
+global_train_step = theano.function([x, y_true], train_step_outputs, updates=train_updates, givens={y_logit: y_logit_shared})
 
 # evaluation (no updates, i.e. no learning)
-train_stepv = theano.function([x, y_true], train_step_outputs)
+train_stepv = theano.function([x, y_true], train_step_outputs, givens={y_logit: y_logit_shared})
 
 #TODO mlp_baseline = 64, 64, 16, 16
 
@@ -336,9 +337,9 @@ if 1:
             YY = Y_true[batch*batch_size: (batch+1)*batch_size]
             # initialize y
             if y_init == '0s':
-                y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+                y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
             else:
-                y_logit.set_value(get_features(XX))
+                y_logit_shared.set_value(get_features(XX))
             # optimize y
             for inner_step in range(num_inner_steps):
                 y_step(XX, YY)
@@ -348,9 +349,9 @@ if 1:
         # train
         # initialize y
         if y_init == '0s':
-            y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+            y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit.set_value(get_features(X))
+            y_logit_shared.set_value(get_features(X))
         # optimize y
         for inner_step in range(num_inner_steps):
             y_stepv(X)
@@ -361,9 +362,9 @@ if 1:
         # valid
         # initialize y
         if y_init == '0s':
-            y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+            y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit.set_value(get_features(Xv))
+            y_logit_shared.set_value(get_features(Xv))
         # optimize y
         for inner_step in range(num_inner_steps):
             y_stepv(Xv)
@@ -384,9 +385,9 @@ if 1:
             YY = Y_true[batch*batch_size: (batch+1)*batch_size]
             # initialize y
             if y_init == '0s':
-                y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+                y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
             else:
-                y_logit.set_value(get_features(XX))
+                y_logit_shared.set_value(get_features(XX))
             # optimize y
             for inner_step in range(num_inner_steps):
                 y_step(XX, YY)
@@ -396,9 +397,9 @@ if 1:
         # train
         # initialize y
         if y_init == '0s':
-            y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+            y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit.set_value(get_features(X))
+            y_logit_shared.set_value(get_features(X))
         # optimize y
         for inner_step in range(num_inner_steps):
             y_stepv(X)
@@ -409,9 +410,9 @@ if 1:
         # valid
         # initialize y
         if y_init == '0s':
-            y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+            y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit.set_value(get_features(Xv))
+            y_logit_shared.set_value(get_features(Xv))
         # optimize y
         for inner_step in range(num_inner_steps):
             y_stepv(Xv)
