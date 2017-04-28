@@ -41,10 +41,10 @@ parser.add_argument('--lr', type=float, default=.0001)
 parser.add_argument('--lr_inner', type=float, default=1.)
 parser.add_argument('--lr_local', type=float, default=.01)
 parser.add_argument('--l2', type=float, default=1e-4)
-#parser.add_argument('--model', type=str, default='spen', choices=['spen', 'mlp', '']) # TODO: mlp
+parser.add_argument('--model', type=str, default='spen', choices=['spen', 'mlp', '']) # TODO: mlp
 parser.add_argument('--nex', type=int, default=1500) # num_examples
 parser.add_argument('--num_epochs', type=int, default=20)
-parser.add_argument('--num_experiments', type=int, default=50)
+parser.add_argument('--num_experiments', type=int, default=10)
 parser.add_argument('--num_inner_steps', type=int, default=100)
 parser.add_argument('--pretrain', type=str, default='local_and_global', choices=['none', 'local', 'local_and_global'])
 parser.add_argument('--y_init', type=str, default='features', choices=['0s', 'features'])
@@ -86,21 +86,19 @@ l2 = np.float32(l2)
 
 
 pretrains = ['none', 'local', 'local_and_global']
-seeds = range(num_experiments)
 
-if 0:
+if 1:
 
     all_monitored = np.empty((len(pretrains), num_experiments, num_epochs))
     all_monitoredv = np.empty((len(pretrains), num_experiments, num_epochs))
     all_monitoredt = np.empty((len(pretrains), num_experiments, num_epochs))
-    mlp_monitoredv = np.empty((num_experiments, num_epochs))
-    mlp_monitoredt = np.empty((num_experiments, num_epochs))
 
     for pt, pretrain in enumerate(pretrains):
-        for seed in seeds:
+        for seed in range(num_experiments):
 
             # ---------------------------------------------------------------
-            print "SET RANDOM SEED"
+            print "SET RANDOM SEED (TODO: rng vs. random.seed)"
+
 
             if seed is not None:
                 np.random.seed(seed)  # for reproducibility
@@ -281,6 +279,7 @@ if 0:
             # at test time, we don't get to see the ground truth, we just find the y which minimizes the energy
             y_stepv = theano.function([x, y_true], y_step_outputs, updates=y_opt.get_updates([y_logit], [], (energy_y_bar).mean()))
 
+            # FIXME: train_loss = nan?
 
             # SSVM loss; energy_y is **approximately** minimized by iterative inference (the y_step function above)
             train_loss = surrogate_loss + energy_y_true - energy_y_bar
@@ -299,6 +298,7 @@ if 0:
             # evaluation (no updates, i.e. no learning)
             train_stepv = theano.function([x, y_true], train_step_outputs)
 
+            #TODO mlp_baseline = 64, 64, 16, 16
 
 
             # ---------------------------------------------------------------
@@ -485,9 +485,6 @@ if 0:
             all_monitored[pt, seed] = monitored[:,-1]
             all_monitoredv[pt, seed] = monitoredv[:,-1]
             all_monitoredt[pt, seed] = monitoredt[:,-1]
-            if pretrain == 'local':
-                mlp_monitoredv[seed] = local_pretraining_monitoredv[:,-1]
-                mlp_monitoredt[seed] = local_pretraining_monitoredt[:,-1]
 
 
 # ---------------------------------------------------------------
@@ -496,14 +493,12 @@ if 0:
 if 1:
     best_epochs = np.argmax(all_monitoredv, axis=-1)
 
-    test_perfs = np.empty((4, num_experiments))
+    test_perfs = np.empty((len(pretrains), num_experiments))
     for pt in range(len(pretrains)):
         for nexp in range(num_experiments):
             test_perfs[pt, nexp] = all_monitoredt[pt, nexp, best_epochs[pt, nexp]]
         print test_perfs[pt].mean()
         print test_perfs[pt].std() / (num_experiments**.5)
-
-        test_perfs[3, nexp] = mlp_monitoredt[nexp, np.argmax(mlp_monitoredv[nexp])]
 
 
     #from utils import err_plot
@@ -516,9 +511,9 @@ np.save('test_perfs', test_perfs)
 
 from pylab import *
 
-N = len(results)
-men_means = [test_perfs[pt].mean() for pt in range(N)]
-men_std = [test_perfs[pt].std() / (num_experiments**.5) for pt in range(N)]
+N = len(pretrains)
+men_means = [test_perfs[pt].mean() for pt in range(len(pretrains))]
+men_std = [test_perfs[pt].std() / (num_experiments**.5) for pt in range(len(pretrains))]
 
 ind = np.arange(N)  # the x locations for the groups
 width = 0.5       # the width of the bars
@@ -529,7 +524,7 @@ rects1 = ax.bar(ind, men_means, width, color='r', yerr=men_std)
 # add some text for labels, title and axes ticks
 ax.set_ylabel('F1 measure')
 ax.set_xticks(ind + width / 2)
-ax.set_xticklabels(('no pretraining', 'local pretraining', 'local and global pretraining', 'mlp'))
+ax.set_xticklabels(('no pretraining', 'local pretraining', 'local and global pretraining'))
 
 savefig('SLJ_')
 

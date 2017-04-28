@@ -7,8 +7,6 @@ Code runs!
 
 TODO:
     baseline MLP
-
-TODO: 
     clean-up code; make it terse and readable
 
 Start by writing a brief description here.
@@ -26,11 +24,12 @@ Start by writing a brief description here.
 Remember to remove WIP when code is "completed" (i.e. being used to run experiments)
 """
 
-# FIXME: I should init y as the output of x...
-#   2015 would just learn that via pretraining
-#   2017 (E2E) learns it via backprop
+# TODO: F1 warning! -- /Tmp/lisa/os_v5/anaconda/lib/python2.7/site-packages/sklearn/metrics/classification.py:1113: UndefinedMetricWarning: F-score is ill-defined and being set to 0.0 in labels with no predicted samples. 'precision', 'predicted', average, warn_for)
 
-#from __future__ import print_function
+
+# TODO: test set, run multiple experiments, 
+
+
 import numpy 
 np = numpy
 
@@ -48,23 +47,23 @@ from sklearn.metrics import f1_score # y_true, y_pred
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=25) # TODO: currently this must evenly divide nex 
-parser.add_argument('--dataset', type=str, default='synthetic', choices=['synthetic', 'flickr', ''])
-parser.add_argument('--y_init', type=str, default='0s', choices=['0s', 'features'])
-parser.add_argument('--l2', type=float, default=0.)
-parser.add_argument('--model', type=str, default='spen', choices=['spen', 'mlp', ''])
+parser.add_argument('--dataset', type=str, default='synthetic', choices=['synthetic', 'flickr', 'test'])
+parser.add_argument('--debug', type=int, default=0)
+parser.add_argument('--lr', type=float, default=.0001)
+parser.add_argument('--lr_inner', type=float, default=1.)
+parser.add_argument('--lr_local', type=float, default=.01)
+parser.add_argument('--l2', type=float, default=1e-5)
+parser.add_argument('--model', type=str, default='spen', choices=['spen', 'mlp', '']) # TODO: mlp
 parser.add_argument('--nex', type=int, default=1500) # num_examples
-#parser.add_argument('--optimizer', type=str, default='sgd', choices=['adam', 'momentum', 'sgd'])
-parser.add_argument('--num_epochs', type=int, default=100)
-#parser.add_argument('--num_train_steps', type=int, default=1000)
+parser.add_argument('--num_epochs', type=int, default=20)
+parser.add_argument('--num_experiments', type=int, default=20)
 parser.add_argument('--num_inner_steps', type=int, default=100)
-# TODO: finish this 
-parser.add_argument('--pretrain', type=str, default='none', choices=['none', 'features', 'features_global', 'features_global_joint'],
-        help="features: pretrain the feature network to predict y; \
-              features_global: pretraing the feature network, then clamp these and train the global network" )
+parser.add_argument('--pretrain', type=str, default='local_and_global', choices=['none', 'local', 'local_and_global'])
+parser.add_argument('--y_init', type=str, default='features', choices=['0s', 'features'])
 #
 parser.add_argument('--save', type=int, default=0)
 parser.add_argument('--save_dir', type=str, default="./")
-parser.add_argument('--seed', type=int, default=1337)
+parser.add_argument('--seed', type=int, default=None)
 parser.add_argument('--verbose', type=int, default=1)
 #locals().update(parser.parse_args().__dict__)
 
@@ -142,6 +141,14 @@ def parameter(shape, name='unnamed', init='normal'):
 def hard_tanh(inp):
     return inp * (inp > 0) + (1 - inp) * (inp > 1)
 
+
+def get_l2(theano_vars):
+    l2 = 0.
+    for var in theano_vars:
+        l2 += ((var.flatten() ** 2).sum())**.5
+    return l2
+
+
 # ---------------------------------------------------------------
 print  "GET DATA"
 input_size = 67
@@ -156,10 +163,20 @@ if dataset == 'synthetic':
     Y_true = onehot(np.argmax(Z4x4, axis=-1)).reshape((-1, 16)).astype('float32')
     # VALID SET
     Xv = np.random.randn(nex, input_size).astype('float32')
-    Av = np.random.randn(input_size, num_labels).astype('float32')
-    Zv = np.dot(X, A) # (N, 16)
-    Z4x4v = Z.reshape((-1, 4, 4))
-    Y_truev = onehot(np.argmax(Z4x4, axis=-1)).reshape((-1, 16)).astype('float32')
+    Zv = np.dot(Xv, A) # (N, 16)
+    Z4x4v = Zv.reshape((-1, 4, 4))
+    Y_truev = onehot(np.argmax(Z4x4v, axis=-1)).reshape((-1, 16)).astype('float32')
+
+elif dataset == 'test': # a bit easier... just the argmax
+    X = np.random.randn(nex, input_size).astype('float32')
+    A = np.random.randn(input_size, num_labels).astype('float32')
+    Y = np.dot(X, A) # (N, 16)
+    Y_true = onehot(np.argmax(Y, axis=-1)).reshape((-1, 16)).astype('float32')
+    # VALID SET
+    Xv = np.random.randn(nex, input_size).astype('float32')
+    Yv = np.dot(Xv, A) # (N, 16)
+    Y_truev = onehot(np.argmax(Yv, axis=-1)).reshape((-1, 16)).astype('float32')
+
 
 
 def shuffle_data():
@@ -171,12 +188,6 @@ def shuffle_data():
     Xv = Xv[shuffles]
     Y_truev = Y_truev[shuffles]
 
-def get_l2(theano_vars):
-    l2 = 0.
-    for var in theano_vars:
-        l2 += ((var.flatten() ** 2).sum())**.5
-    return l2
-
 # ---------------------------------------------------------------
 print "SET-UP TRAINING"
 # See sections 3, 7.3, A.4, A.5
@@ -185,8 +196,8 @@ print "SET-UP TRAINING"
 x = T.matrix('float32')
 x.tag.test_value = X[:batch_size]
 # following Belanger et al. (2017), we optimize the logit instead of doing mirror descent
-y_logit_shared = theano.shared(np.zeros((batch_size, num_labels)).astype('float32'), name='y_logit_shared')
-y_logit = T.matrix('float32')
+y_logit = theano.shared(np.zeros((batch_size, num_labels)).astype('float32'), name='y_logit')
+#y_logit_full_batch = theano.shared(np.zeros((batch_size, num_labels)).astype('float32'), name='y_logit')
 y_bar = T.nnet.sigmoid(y_logit)
 y_true = T.matrix('float32')
 y_true.tag.test_value = Y_true[:batch_size]
@@ -210,13 +221,14 @@ local_pretraining_preds = T.cast(T.nnet.sigmoid(features)>.5, 'float32')
 local_pretraining_error = T.neq(y_true, local_pretraining_preds).mean() 
 local_pretraining_step = theano.function( inputs=[x, y_true], 
                                       outputs=[local_pretraining_loss, local_pretraining_error, local_pretraining_preds],
-                                      updates=SGD(lr=.01, momentum=.9).get_updates(local_params, [local_pretraining_loss, local_pretraining_error], local_pretraining_loss) )
+                                      updates=SGD(lr=lr_local, momentum=.9).get_updates(local_params, [], local_pretraining_loss) )
 # evaluation (no updates, i.e. no learning)
 local_pretraining_stepv = theano.function( inputs=[x, y_true], 
                                       outputs=[local_pretraining_loss, local_pretraining_error, local_pretraining_preds])
 # this is used to initialize y_logits (section?)
 get_features = theano.function( inputs=[x], outputs=features)
 
+# TODO: double check this!!!
 # In pretraining, we minimize cost when: (features > 0 AND y == 1) OR (features < 0 AND y == 0)
 # To make these have LOW energy, we set the local energy to the NEGATIVE pairwise product of features and y
 local_energy = lambda y : T.sum(-y * features, axis=-1)
@@ -230,18 +242,19 @@ global_Ws += [parameter((num_labels, 4), 'global_W0')]
 global_bs += [parameter((4,), 'global_b0', 'bias')]
 #global_Ws += [parameter((4, 1), 'global_W1')]
 global_Ws += [parameter((4,), 'global_W1')]
-global_bs += [parameter((1,), 'global_b1', 'scalar')]
+#global_bs += [parameter((1,), 'global_b1', 'scalar')]
 global_params = global_Ws + global_bs
 def global_energy(y):
     rval = hard_tanh(T.dot(y, global_Ws[0]) + global_bs[0])
-    return T.dot(rval, global_Ws[1]) + global_bs[1]
+    return T.dot(rval, global_Ws[1])# + global_bs[1]
 
 params = local_params + global_params
-
 
 energy = lambda y : local_energy(y) + global_energy(y)
 energy_y_bar = energy(y_bar)
 energy_y_true = energy(y_true)
+
+energy_fn = theano.function([x, y_true], [local_energy(y_true), global_energy(y_true)])
 
 
 #---------------
@@ -254,12 +267,11 @@ surrogate_loss = binary_crossentropy(y_true, y_bar)
 
 
 # loss-augmented inference
-y_opt = SGD(lr=.1, momentum=.95)
-y_step_outputs = [y_bar, y_pred]
-# FIXME: these need to depend on y_logit_shared...
-y_step = theano.function([x, y_true], y_step_outputs, updates=y_opt.get_updates([y_logit_shared], [], (surrogate_loss + energy_y_bar).mean()))
+y_opt = SGD(lr=lr_inner, momentum=.9)
+y_step_outputs = [y_true, y_bar, y_pred]
+y_step = theano.function([x, y_true], y_step_outputs, updates=y_opt.get_updates([y_logit], [], (-surrogate_loss + energy_y_bar).mean()))
 # at test time, we don't get to see the ground truth, we just find the y which minimizes the energy
-y_stepv = theano.function([x], y_step_outputs, updates=y_opt.get_updates([y_logit_shared], [], (energy_y_bar).mean()))
+y_stepv = theano.function([x, y_true], y_step_outputs, updates=y_opt.get_updates([y_logit], [], (energy_y_bar).mean()))
 
 # FIXME: train_loss = nan?
 
@@ -268,16 +280,17 @@ train_loss = surrogate_loss + energy_y_true - energy_y_bar
 train_loss = train_loss * (train_loss > 0)
 #global_train_loss = train_loss + l2 * get_l2(global_params)
 train_loss = train_loss * (train_loss > 0) + get_l2(params)
-train_updates = SGD(lr=.01, momentum=.9).get_updates(params, [], train_loss.mean())
+train_updates = SGD(lr=lr, momentum=.9).get_updates(params, [], train_loss.mean())
 train_step_outputs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-train_step = theano.function([x, y_true], train_step_outputs, updates=train_updates, givens={y_logit: y_logit_shared})
+outs_str = "[train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]"
+train_step = theano.function([x, y_true], train_step_outputs, updates=train_updates)
 
 # for the global training, we only update the global params
 global_train_updates = SGD(lr=.01, momentum=.9).get_updates(global_params, [], train_loss.mean())
-global_train_step = theano.function([x, y_true], train_step_outputs, updates=train_updates, givens={y_logit: y_logit_shared})
+global_train_step = theano.function([x, y_true], train_step_outputs, updates=train_updates)
 
 # evaluation (no updates, i.e. no learning)
-train_stepv = theano.function([x, y_true], train_step_outputs, givens={y_logit: y_logit_shared})
+train_stepv = theano.function([x, y_true], train_step_outputs)
 
 #TODO mlp_baseline = 64, 64, 16, 16
 
@@ -306,7 +319,7 @@ monitored  = np.empty((num_epochs, 3))
 monitoredv = np.empty((num_epochs, 3))
 
 # -------------------------
-if 1:
+if 'local' in pretrain:
     print "\n PRETRAINING local energy\n"
     for epoch in range(num_epochs):
         # TRAINING STEPS
@@ -327,7 +340,7 @@ if 1:
 
 
     
-if 1:
+if 'global' in pretrain:
     print "\nPRETRAINING global energy\n"
     for epoch in range(num_epochs):
         # TRAINING STEPS
@@ -337,9 +350,9 @@ if 1:
             YY = Y_true[batch*batch_size: (batch+1)*batch_size]
             # initialize y
             if y_init == '0s':
-                y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+                y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
             else:
-                y_logit_shared.set_value(get_features(XX))
+                y_logit.set_value(get_features(XX))
             # optimize y
             for inner_step in range(num_inner_steps):
                 y_step(XX, YY)
@@ -349,27 +362,29 @@ if 1:
         # train
         # initialize y
         if y_init == '0s':
-            y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+            y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit_shared.set_value(get_features(X))
+            y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
-            y_stepv(X)
+            y_stepv(XX, YY)
         # outs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-        outs = train_stepv(X, Y_true)
+        outs = train_stepv(XX, YY)
         global_monitored[epoch] = outs[0].mean(), outs[-1].mean(), np.mean([f1_score(outs[-3][nn], outs[-2][nn], average='macro') for nn in range(batch_size)])
 
         # valid
+        XX = Xv[batch*batch_size: (batch+1)*batch_size]
+        YY = Y_truev[batch*batch_size: (batch+1)*batch_size]
         # initialize y
         if y_init == '0s':
-            y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+            y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit_shared.set_value(get_features(Xv))
+            y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
-            y_stepv(Xv)
+            y_stepv(XX, YY)
         # outs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-        outs = train_stepv(Xv, Y_truev)
+        outs = train_stepv(XX, YY)
         global_monitoredv[epoch] = outs[0].mean(), outs[-1].mean(), np.mean([f1_score(outs[-3][nn], outs[-2][nn], average='macro') for nn in range(batch_size)])
 
         print "(train)  loss, error, F1:  ", global_monitored[epoch],'           (valid):  ', global_monitoredv[epoch]
@@ -383,41 +398,58 @@ if 1:
         for batch in range(num_batches): 
             XX = X[batch*batch_size: (batch+1)*batch_size]
             YY = Y_true[batch*batch_size: (batch+1)*batch_size]
+
+            if debug:
+                en = energy_fn(XX,YY)
+                print ""
+                print en
+                print global_params
+                import ipdb; ipdb.set_trace()
+
             # initialize y
             if y_init == '0s':
-                y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+                y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
             else:
-                y_logit_shared.set_value(get_features(XX))
+                y_logit.set_value(get_features(XX))
             # optimize y
             for inner_step in range(num_inner_steps):
-                y_step(XX, YY)
+                yt, yb, yp = y_step(XX, YY)
+                if debug:
+                    print ""
+                    print yt[0]
+                    print yb[0]
+                    print yp[0]
+
             train_step(XX, YY)
 
         # MONITORING
         # train
         # initialize y
         if y_init == '0s':
-            y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+            y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit_shared.set_value(get_features(X))
+            y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
-            y_stepv(X)
+            y_stepv(XX, YY)
         # outs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-        outs = train_stepv(X, Y_true)
+        outs = train_stepv(XX, YY)
+        #print outs
         monitored[epoch] = outs[0].mean(), outs[-1].mean(), np.mean([f1_score(outs[-3][nn], outs[-2][nn], average='macro') for nn in range(batch_size)])
 
         # valid
+        XX = Xv[batch*batch_size: (batch+1)*batch_size]
+        YY = Y_truev[batch*batch_size: (batch+1)*batch_size]
         # initialize y
         if y_init == '0s':
-            y_logit_shared.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
+            y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit_shared.set_value(get_features(Xv))
+            y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
-            y_stepv(Xv)
+            y_stepv(XX, YY)
         # outs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-        outs = train_stepv(Xv, Y_truev)
+        outs = train_stepv(XX, YY)
         monitoredv[epoch] = outs[0].mean(), outs[-1].mean(), np.mean([f1_score(outs[-3][nn], outs[-2][nn], average='macro') for nn in range(batch_size)])
 
         print "(train)  loss, error, F1:  ", monitored[epoch],'           (valid):  ', monitoredv[epoch]
