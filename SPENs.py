@@ -48,19 +48,14 @@ from sklearn.metrics import f1_score # y_true, y_pred
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=25) # TODO: currently this must evenly divide nex 
-parser.add_argument('--dataset', type=str, default='synthetic', choices=['synthetic', 'flickr', ''])
-parser.add_argument('--y_init', type=str, default='0s', choices=['0s', 'features'])
-parser.add_argument('--l2', type=float, default=0.)
-parser.add_argument('--model', type=str, default='spen', choices=['spen', 'mlp', ''])
+parser.add_argument('--dataset', type=str, default='synthetic', choices=['synthetic', 'flickr', 'test'])
+parser.add_argument('--l2', type=float, default=1e-5)
+parser.add_argument('--model', type=str, default='spen', choices=['spen', 'mlp', '']) # TODO: mlp
 parser.add_argument('--nex', type=int, default=1500) # num_examples
-#parser.add_argument('--optimizer', type=str, default='sgd', choices=['adam', 'momentum', 'sgd'])
 parser.add_argument('--num_epochs', type=int, default=100)
-#parser.add_argument('--num_train_steps', type=int, default=1000)
-parser.add_argument('--num_inner_steps', type=int, default=100)
-# TODO: finish this 
-parser.add_argument('--pretrain', type=str, default='none', choices=['none', 'features', 'features_global', 'features_global_joint'],
-        help="features: pretrain the feature network to predict y; \
-              features_global: pretraing the feature network, then clamp these and train the global network" )
+parser.add_argument('--num_inner_steps', type=int, default=40)
+parser.add_argument('--pretrain', type=str, default='local_and_global', choices=['none', 'local', 'local_and_global'])
+parser.add_argument('--y_init', type=str, default='features', choices=['0s', 'features'])
 #
 parser.add_argument('--save', type=int, default=0)
 parser.add_argument('--save_dir', type=str, default="./")
@@ -142,6 +137,14 @@ def parameter(shape, name='unnamed', init='normal'):
 def hard_tanh(inp):
     return inp * (inp > 0) + (1 - inp) * (inp > 1)
 
+
+def get_l2(theano_vars):
+    l2 = 0.
+    for var in theano_vars:
+        l2 += ((var.flatten() ** 2).sum())**.5
+    return l2
+
+
 # ---------------------------------------------------------------
 print  "GET DATA"
 input_size = 67
@@ -156,10 +159,19 @@ if dataset == 'synthetic':
     Y_true = onehot(np.argmax(Z4x4, axis=-1)).reshape((-1, 16)).astype('float32')
     # VALID SET
     Xv = np.random.randn(nex, input_size).astype('float32')
-    Av = np.random.randn(input_size, num_labels).astype('float32')
-    Zv = np.dot(X, A) # (N, 16)
-    Z4x4v = Z.reshape((-1, 4, 4))
-    Y_truev = onehot(np.argmax(Z4x4, axis=-1)).reshape((-1, 16)).astype('float32')
+    Zv = np.dot(Xv, A) # (N, 16)
+    Z4x4v = Zv.reshape((-1, 4, 4))
+    Y_truev = onehot(np.argmax(Z4x4v, axis=-1)).reshape((-1, 16)).astype('float32')
+elif dataset == 'test': # a bit easier... just the argmax
+    X = np.random.randn(nex, input_size).astype('float32')
+    A = np.random.randn(input_size, num_labels).astype('float32')
+    Y = np.dot(X, A) # (N, 16)
+    Y_true = onehot(np.argmax(Y, axis=-1)).reshape((-1, 16)).astype('float32')
+    # VALID SET
+    Xv = np.random.randn(nex, input_size).astype('float32')
+    Yv = np.dot(Xv, A) # (N, 16)
+    Y_truev = onehot(np.argmax(Yv, axis=-1)).reshape((-1, 16)).astype('float32')
+
 
 
 def shuffle_data():
@@ -170,12 +182,6 @@ def shuffle_data():
     shuffles = np.random.permutation(nex)
     Xv = Xv[shuffles]
     Y_truev = Y_truev[shuffles]
-
-def get_l2(theano_vars):
-    l2 = 0.
-    for var in theano_vars:
-        l2 += ((var.flatten() ** 2).sum())**.5
-    return l2
 
 # ---------------------------------------------------------------
 print "SET-UP TRAINING"
@@ -305,7 +311,7 @@ monitored  = np.empty((num_epochs, 3))
 monitoredv = np.empty((num_epochs, 3))
 
 # -------------------------
-if 1:
+if 'local' in pretrain:
     print "\n PRETRAINING local energy\n"
     for epoch in range(num_epochs):
         # TRAINING STEPS
@@ -326,7 +332,7 @@ if 1:
 
 
     
-if 1:
+if 'global' in pretrain:
     print "\nPRETRAINING global energy\n"
     for epoch in range(num_epochs):
         # TRAINING STEPS
@@ -350,25 +356,27 @@ if 1:
         if y_init == '0s':
             y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit.set_value(get_features(X))
+            y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
-            y_stepv(X)
+            y_stepv(XX)
         # outs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-        outs = train_stepv(X, Y_true)
+        outs = train_stepv(XX, YY)
         global_monitored[epoch] = outs[0].mean(), outs[-1].mean(), np.mean([f1_score(outs[-3][nn], outs[-2][nn], average='macro') for nn in range(batch_size)])
 
         # valid
+        XX = Xv[batch*batch_size: (batch+1)*batch_size]
+        YY = Y_truev[batch*batch_size: (batch+1)*batch_size]
         # initialize y
         if y_init == '0s':
             y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit.set_value(get_features(Xv))
+            y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
-            y_stepv(Xv)
+            y_stepv(XX)
         # outs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-        outs = train_stepv(Xv, Y_truev)
+        outs = train_stepv(XX, YY)
         global_monitoredv[epoch] = outs[0].mean(), outs[-1].mean(), np.mean([f1_score(outs[-3][nn], outs[-2][nn], average='macro') for nn in range(batch_size)])
 
         print "(train)  loss, error, F1:  ", global_monitored[epoch],'           (valid):  ', global_monitoredv[epoch]
@@ -398,25 +406,27 @@ if 1:
         if y_init == '0s':
             y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit.set_value(get_features(X))
+            y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
-            y_stepv(X)
+            y_stepv(XX)
         # outs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-        outs = train_stepv(X, Y_true)
+        outs = train_stepv(XX, YY)
         monitored[epoch] = outs[0].mean(), outs[-1].mean(), np.mean([f1_score(outs[-3][nn], outs[-2][nn], average='macro') for nn in range(batch_size)])
 
         # valid
+        XX = Xv[batch*batch_size: (batch+1)*batch_size]
+        YY = Y_truev[batch*batch_size: (batch+1)*batch_size]
         # initialize y
         if y_init == '0s':
             y_logit.set_value((.0 * np.ones((batch_size, num_labels))).astype('float32'))
         else:
-            y_logit.set_value(get_features(Xv))
+            y_logit.set_value(get_features(XX))
         # optimize y
         for inner_step in range(num_inner_steps):
-            y_stepv(Xv)
+            y_stepv(XX)
         # outs = [train_loss, surrogate_loss, energy_y_true, energy_y_bar, y_true, y_pred, zero_one_loss]
-        outs = train_stepv(Xv, Y_truev)
+        outs = train_stepv(XX, YY)
         monitoredv[epoch] = outs[0].mean(), outs[-1].mean(), np.mean([f1_score(outs[-3][nn], outs[-2][nn], average='macro') for nn in range(batch_size)])
 
         print "(train)  loss, error, F1:  ", monitored[epoch],'           (valid):  ', monitoredv[epoch]
